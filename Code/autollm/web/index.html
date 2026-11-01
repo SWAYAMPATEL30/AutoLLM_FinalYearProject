@@ -1348,6 +1348,11 @@
         let currentCurationMode = 'synthetic';
         let currentRecipeYaml = '';
 
+        // Dynamically point to backend port 8000 if loaded via file:/// or other dev ports
+        const API_BASE = (window.location.protocol === 'file:' || (window.location.port && window.location.port !== '8000'))
+            ? 'http://127.0.0.1:8000'
+            : '';
+
         function selectEngine(mode) {
             currentTrainingMode = mode;
             const cardQwen = document.getElementById('cardQwen');
@@ -1461,7 +1466,7 @@
             previewBtn.disabled = true;
 
             try {
-                const res = await fetch('/api/synthesize-preview', {
+                const res = await fetch(`${API_BASE}/api/synthesize-preview`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ prompt: prompt })
@@ -1518,7 +1523,7 @@
                 appendLog(`[AGENT] Querying live Hugging Face hub for top 3 matching datasets...`);
 
                 try {
-                    const res = await fetch('/api/find-datasets', {
+                    const res = await fetch(`${API_BASE}/api/find-datasets`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ prompt: prompt })
@@ -1603,7 +1608,7 @@
             appendLog(`[PIPELINE] Launching Oumi lifecycle: curation=${currentCurationMode}, engine=${currentTrainingMode}`);
 
             try {
-                const res = await fetch('/api/build', {
+                const res = await fetch(`${API_BASE}/api/build`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -1619,6 +1624,7 @@
                 startPolling(currentJobId);
             } catch (err) {
                 appendLog(`[ERROR] Failed to start build: ${err.message}`);
+                appendLog(`[HINT] Ensure the backend server is running: 'python server.py' in the Code/ directory (listening on http://127.0.0.1:8000)`);
                 buildBtn.disabled = false;
                 buildBtn.innerHTML = '<span>🚀 Compile & Build Model</span>';
             }
@@ -1630,7 +1636,7 @@
 
             pollInterval = setInterval(async () => {
                 try {
-                    const res = await fetch(`/api/status/${jobId}`);
+                    const res = await fetch(`${API_BASE}/api/status/${jobId}`);
                     const job = await res.json();
                     const p = job.progress;
 
@@ -1681,10 +1687,10 @@
             document.getElementById('metricLoss').innerText = (m.val_loss || '0.218');
             document.getElementById('metricSize').innerText = (pkg.model_size_mb || '14.2') + ' MB';
             
-            document.getElementById('downloadPackageBtn').href = `/api/download/${job.job_id}`;
-            document.getElementById('downloadDatasetBtn').href = `/api/dataset-download/${job.job_id}`;
-            document.getElementById('downloadRecipeBtn').href = `/api/recipe-download/${job.job_id}`;
-            document.getElementById('modalDownloadRecipeBtn').href = `/api/recipe-download/${job.job_id}`;
+            document.getElementById('downloadPackageBtn').href = `${API_BASE}/api/download/${job.job_id}`;
+            document.getElementById('downloadDatasetBtn').href = `${API_BASE}/api/dataset-download/${job.job_id}`;
+            document.getElementById('downloadRecipeBtn').href = `${API_BASE}/api/recipe-download/${job.job_id}`;
+            document.getElementById('modalDownloadRecipeBtn').href = `${API_BASE}/api/recipe-download/${job.job_id}`;
 
             loadDatasetViewer(job.job_id);
             loadEvalReport(job.job_id);
@@ -1695,7 +1701,7 @@
 
         async function loadEvalReport(jobId) {
             try {
-                const res = await fetch(`/api/eval-report/${jobId}`);
+                const res = await fetch(`${API_BASE}/api/eval-report/${jobId}`);
                 if (!res.ok) return;
                 const report = await res.json();
 
@@ -1760,7 +1766,7 @@
 
         async function loadRecipe(jobId) {
             try {
-                const res = await fetch(`/api/recipe/${jobId}`);
+                const res = await fetch(`${API_BASE}/api/recipe/${jobId}`);
                 if (res.ok) {
                     const data = await res.json();
                     currentRecipeYaml = data.recipe_yaml || '';
@@ -1781,7 +1787,7 @@
 
         async function loadDatasetViewer(jobId) {
             try {
-                const res = await fetch(`/api/dataset/${jobId}`);
+                const res = await fetch(`${API_BASE}/api/dataset/${jobId}`);
                 if (res.ok) {
                     const data = await res.json();
                     document.getElementById('datasetViewerTitle').innerText = `Training Dataset: ${data.dataset_name}`;
@@ -1836,7 +1842,7 @@
             chatArea.scrollTop = chatArea.scrollHeight;
 
             try {
-                const res = await fetch('/api/chat', {
+                const res = await fetch(`${API_BASE}/api/chat`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ job_id: currentJobId, prompt: text })
