@@ -183,17 +183,25 @@ def get_inference_engine(job_dir: str, domain: str = "general"):
     Factory function returning the best available inference engine for a job.
     Uses Qwen LoRA neural engine if adapter exists, else falls back to DomainInferenceEngine.
     """
-    adapter_dir = os.path.join(job_dir, "adapter")
-    if os.path.exists(adapter_dir) and (
-        os.path.exists(os.path.join(adapter_dir, "adapter_model.safetensors")) or
-        os.path.exists(os.path.join(adapter_dir, "adapter_model.bin"))
-    ):
-        try:
-            return QwenInferenceEngine(adapter_dir=adapter_dir)
-        except Exception as e:
-            print(f"Warning: Failed to load QwenInferenceEngine: {e}. Falling back.")
+    candidates = [
+        os.path.join(job_dir, "adapter"),
+        os.path.join(job_dir, "export", "adapter"),
+        job_dir
+    ]
+    for adapter_dir in candidates:
+        if os.path.exists(adapter_dir) and (
+            os.path.exists(os.path.join(adapter_dir, "adapter_model.safetensors")) or
+            os.path.exists(os.path.join(adapter_dir, "adapter_model.bin"))
+        ):
+            try:
+                print(f"[Inference] Initializing Qwen 2.5 LoRA neural engine from {adapter_dir}...")
+                return QwenInferenceEngine(adapter_dir=adapter_dir)
+            except Exception as e:
+                print(f"Warning: Failed to load QwenInferenceEngine from {adapter_dir}: {e}. Falling back.")
 
     knowledge_path = os.path.join(job_dir, "knowledge.jsonl")
+    if not os.path.exists(knowledge_path):
+        knowledge_path = os.path.join(job_dir, "export", "knowledge.jsonl")
     if not os.path.exists(knowledge_path):
         knowledge_path = os.path.join(job_dir, "data", "train.jsonl")
 

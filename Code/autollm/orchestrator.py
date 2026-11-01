@@ -45,12 +45,14 @@ class AutoLLMOrchestrator:
     def run(
         self,
         prompt: str,
+        job_id: Optional[str] = None,
         chosen_dataset_id: Optional[str] = None,
         training_mode: Optional[str] = "qwen_lora",
         curation_mode: Optional[str] = "web_search",
         on_progress: Optional[Callable[[PipelineProgress], None]] = None
     ) -> Dict[str, Any]:
-        job_id = f"job_{int(time.time())}_{uuid.uuid4().hex[:6]}"
+        if not job_id:
+            job_id = f"job_{int(time.time())}_{uuid.uuid4().hex[:6]}"
         job_dir = os.path.abspath(os.path.join(self.base_jobs_dir, job_id))
         os.makedirs(job_dir, exist_ok=True)
 

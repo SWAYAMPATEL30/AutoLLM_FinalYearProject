@@ -86,6 +86,7 @@ def run_job_in_background(
     try:
         result = orchestrator.run(
             prompt,
+            job_id=job_id,
             chosen_dataset_id=dataset_id,
             training_mode=training_mode,
             curation_mode=curation_mode,
@@ -138,9 +139,19 @@ def ensure_job_loaded(job_id: str):
     if job_id not in jobs_state:
         job_dir = os.path.join(JOBS_DIR, job_id)
         export_dir = os.path.join(job_dir, "export")
-        if os.path.exists(export_dir) and os.path.exists(os.path.join(export_dir, "model.pt")):
+        has_adapter = (
+            os.path.exists(os.path.join(job_dir, "adapter")) or 
+            os.path.exists(os.path.join(export_dir, "adapter"))
+        )
+        has_scratch = (
+            os.path.exists(os.path.join(job_dir, "model.pt")) or 
+            os.path.exists(os.path.join(export_dir, "model.pt"))
+        )
+        if has_adapter or has_scratch:
             metrics = {}
-            metrics_path = os.path.join(export_dir, "eval_metrics.json")
+            metrics_path = os.path.join(job_dir, "eval_metrics.json")
+            if not os.path.exists(metrics_path):
+                metrics_path = os.path.join(export_dir, "eval_metrics.json")
             if os.path.exists(metrics_path):
                 try:
                     with open(metrics_path, "r", encoding="utf-8") as f:
@@ -160,8 +171,8 @@ def ensure_job_loaded(job_id: str):
                 "result": {
                     "job_id": job_id,
                     "status": "success",
-                    "spec": {"domain": "medical"},
-                    "package": {"model_dir": export_dir},
+                    "spec": {"domain": "finance"},
+                    "package": {"model_dir": export_dir if os.path.exists(export_dir) else job_dir},
                     "metrics": metrics
                 }
             }
@@ -182,13 +193,18 @@ def test_model(req: ChatRequest):
     if job_id not in jobs_state or jobs_state[job_id].get("status") != "completed":
         raise HTTPException(status_code=400, detail="Job has not completed yet.")
 
-    job_dir = os.path.join(JOBS_DIR, job_id)
-    domain = jobs_state[job_id].get("result", {}).get("spec", {}).get("domain", "general")
+    res = jobs_state[job_id].get("result", {})
+    actual_job_id = res.get("job_id", job_id)
+    job_dir = os.path.join(JOBS_DIR, actual_job_id)
+    if not os.path.exists(job_dir):
+        job_dir = os.path.join(JOBS_DIR, job_id)
 
-    if job_id not in loaded_models:
-        loaded_models[job_id] = get_inference_engine(job_dir, domain=domain)
+    domain = res.get("spec", {}).get("domain", "general")
 
-    engine = loaded_models[job_id]
+    if actual_job_id not in loaded_models:
+        loaded_models[actual_job_id] = get_inference_engine(job_dir, domain=domain)
+
+    engine = loaded_models[actual_job_id]
     completion = engine.generate_response(
         user_query=req.prompt,
         max_tokens=req.max_tokens,
