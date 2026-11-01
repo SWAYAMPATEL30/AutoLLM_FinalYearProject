@@ -1,0 +1,60 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Large Model Weights and Checkpoints (>100MB / binary artifacts)
+*.pt
+*.pth
+*.bin
+*.safetensors
+*.onnx
+*.zip
+*.tar.gz
+
+# Local pipeline job runs and temporary cache
+jobs/
+test_jobs/
+test_agri_jobs/
+test_qwen_jobs/
+Code/jobs/
+Code/test_jobs/
+Code/test_agri_jobs/
+Code/test_qwen_jobs/
+cache/
+.cache/
+
+# IDE / Editor folders
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS generated files
+.DS_Store
+Thumbs.db
