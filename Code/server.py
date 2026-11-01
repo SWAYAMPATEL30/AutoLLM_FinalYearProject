@@ -38,6 +38,7 @@ class BuildRequest(BaseModel):
     prompt: str
     dataset_id: Optional[str] = None
     training_mode: Optional[str] = "qwen_lora"
+    curation_mode: Optional[str] = "web_search"
 
 class ChatRequest(BaseModel):
     job_id: str
@@ -69,7 +70,13 @@ def find_datasets(req: FindDatasetsRequest):
         "datasets": [d.model_dump() for d in datasets]
     }
 
-def run_job_in_background(job_id: str, prompt: str, dataset_id: Optional[str] = None, training_mode: Optional[str] = "qwen_lora"):
+def run_job_in_background(
+    job_id: str,
+    prompt: str,
+    dataset_id: Optional[str] = None,
+    training_mode: Optional[str] = "qwen_lora",
+    curation_mode: Optional[str] = "web_search"
+):
     orchestrator = AutoLLMOrchestrator(base_jobs_dir=JOBS_DIR, force_cpu=True)
 
     def on_progress(p: PipelineProgress):
@@ -81,6 +88,7 @@ def run_job_in_background(job_id: str, prompt: str, dataset_id: Optional[str] = 
             prompt,
             chosen_dataset_id=dataset_id,
             training_mode=training_mode,
+            curation_mode=curation_mode,
             on_progress=on_progress
         )
         jobs_state[job_id]["result"] = result
@@ -104,6 +112,7 @@ def start_build(req: BuildRequest, background_tasks: BackgroundTasks):
         "prompt": req.prompt,
         "dataset_id": req.dataset_id,
         "training_mode": req.training_mode or "qwen_lora",
+        "curation_mode": req.curation_mode or "web_search",
         "status": "running",
         "progress": {
             "job_id": job_id,
@@ -111,11 +120,18 @@ def start_build(req: BuildRequest, background_tasks: BackgroundTasks):
             "percentage": 2.0,
             "status": "running",
             "message": "Initializing build pipeline...",
-            "logs": ["AutoLLM Agent initialized on CPU."]
+            "logs": ["AutoLLM Agent initialized on CPU (Oumi/Distil Loop Active)."]
         }
     }
 
-    background_tasks.add_task(run_job_in_background, job_id, req.prompt, req.dataset_id, req.training_mode or "qwen_lora")
+    background_tasks.add_task(
+        run_job_in_background,
+        job_id,
+        req.prompt,
+        req.dataset_id,
+        req.training_mode or "qwen_lora",
+        req.curation_mode or "web_search"
+    )
     return {"job_id": job_id, "status": "started"}
 
 def ensure_job_loaded(job_id: str):
@@ -244,6 +260,69 @@ def download_dataset_file(job_id: str):
         media_type="application/jsonl",
         filename=f"dataset_{job_id}.jsonl"
     )
+
+@app.get("/api/recipe/{job_id}")
+def get_recipe_yaml(job_id: str):
+    job_dir = os.path.join(JOBS_DIR, job_id)
+    recipe_file = os.path.join(job_dir, "recipe.yaml")
+    if not os.path.exists(recipe_file):
+        recipe_file = os.path.join(job_dir, "export", "recipe.yaml")
+    if not os.path.exists(recipe_file):
+        raise HTTPException(status_code=404, detail="Recipe file not found.")
+
+    with open(recipe_file, "r", encoding="utf-8") as f:
+        content = f.read()
+    return {"job_id": job_id, "recipe_yaml": content}
+
+@app.get("/api/recipe-download/{job_id}")
+def download_recipe_yaml(job_id: str):
+    job_dir = os.path.join(JOBS_DIR, job_id)
+    recipe_file = os.path.join(job_dir, "recipe.yaml")
+    if not os.path.exists(recipe_file):
+        recipe_file = os.path.join(job_dir, "export", "recipe.yaml")
+    if not os.path.exists(recipe_file):
+        raise HTTPException(status_code=404, detail="Recipe file not found.")
+
+    return FileResponse(
+        recipe_file,
+        media_type="application/x-yaml",
+        filename=f"recipe_{job_id}.yaml"
+    )
+
+@app.get("/api/eval-report/{job_id}")
+def get_eval_report(job_id: str):
+    job_dir = os.path.join(JOBS_DIR, job_id)
+    report_file = os.path.join(job_dir, "eval_report.json")
+    if not os.path.exists(report_file):
+        report_file = os.path.join(job_dir, "export", "eval_report.json")
+    if not os.path.exists(report_file):
+        # Fallback if evaluation is still running or metrics only
+        if job_id in jobs_state and "result" in jobs_state[job_id]:
+            report = jobs_state[job_id]["result"].get("eval_report", {})
+            if report:
+                return report
+        raise HTTPException(status_code=404, detail="Evaluation report not found.")
+
+    with open(report_file, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+@app.post("/api/synthesize-preview")
+def preview_synthetic_dataset(req: FindDatasetsRequest):
+    from autollm.datasets.synthesizer import DatasetSynthesizer
+    from autollm.intent.parser import IntentParser
+
+    parser = IntentParser(force_cpu=True)
+    spec = parser.parse(req.prompt)
+    system_prompt = DatasetSynthesizer.generate_system_prompt(spec.domain, spec.task_type.value, req.prompt)
+    generators = DatasetSynthesizer._get_domain_seed_generators(spec.domain, req.prompt, spec.task_type)
+
+    preview_items = [g(i).model_dump() for i, g in enumerate(generators[:6])]
+    return {
+        "domain": spec.domain,
+        "task_type": spec.task_type.value,
+        "system_prompt": system_prompt,
+        "samples": preview_items
+    }
 
 if __name__ == "__main__":
     import uvicorn

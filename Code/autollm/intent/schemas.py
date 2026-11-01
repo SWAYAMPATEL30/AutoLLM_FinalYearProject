@@ -20,6 +20,11 @@ class DeviceType(str, Enum):
     CPU = "cpu"
     CUDA = "cuda"
 
+class DataCurationMode(str, Enum):
+    WEB_SEARCH = "web_search"
+    SYNTHETIC = "synthetic"
+    AUGMENTED = "augmented"
+
 class HardwareEstimate(BaseModel):
     device: DeviceType = DeviceType.CPU
     available_ram_gb: float
@@ -41,6 +46,8 @@ class PipelineSpec(BaseModel):
     language: str = "English"
     base_model: Optional[str] = "Qwen/Qwen2.5-0.5B-Instruct"
     training_mode: str = "qwen_lora"
+    curation_mode: DataCurationMode = DataCurationMode.WEB_SEARCH
+    system_prompt: Optional[str] = None
     dataset_query: Optional[str] = None
     epochs: int = 3
     batch_size: int = 4
@@ -93,6 +100,25 @@ class PipelineProgress(BaseModel):
     model_artifact_path: Optional[str] = None
     api_url: Optional[str] = None
 
+class EvaluationSample(BaseModel):
+    query: str
+    expected_concept: str = ""
+    baseline_output: str
+    finetuned_output: str
+    baseline_score: float
+    finetuned_score: float
+    failure_mode_resolved: Optional[str] = None
+
+class EvaluationReport(BaseModel):
+    baseline_accuracy_pct: float
+    finetuned_accuracy_pct: float
+    improvement_delta_pct: float
+    failure_reduction_rate_pct: float
+    avg_latency_ms: float
+    failure_modes: List[Dict[str, Any]] = Field(default_factory=list)
+    samples: List[EvaluationSample] = Field(default_factory=list)
+    summary: str = ""
+
 class DeploymentPackage(BaseModel):
     job_id: str
     model_dir: str
@@ -100,5 +126,7 @@ class DeploymentPackage(BaseModel):
     tokenizer_path: str
     serve_script_path: str
     interactive_ui_path: str
+    recipe_yaml_path: Optional[str] = None
     model_size_mb: float
     eval_metrics: Dict[str, Any] = Field(default_factory=dict)
+    eval_report: Optional[Dict[str, Any]] = None

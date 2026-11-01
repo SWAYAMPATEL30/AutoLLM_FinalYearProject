@@ -33,6 +33,11 @@ class PackageBuilder:
         adapter_src = os.path.join(job_dir, "adapter")
         adapter_dest = os.path.join(export_dir, "adapter")
 
+        recipe_src = os.path.join(job_dir, "recipe.yaml")
+        recipe_dest = os.path.join(export_dir, "recipe.yaml")
+        eval_report_src = os.path.join(job_dir, "eval_report.json")
+        eval_report_dest = os.path.join(export_dir, "eval_report.json")
+
         if os.path.exists(adapter_src):
             if os.path.exists(adapter_dest):
                 shutil.rmtree(adapter_dest)
@@ -46,6 +51,10 @@ class PackageBuilder:
             shutil.copy2(metrics_src, metrics_dest)
         if os.path.exists(data_src):
             shutil.copy2(data_src, data_dest)
+        if os.path.exists(recipe_src):
+            shutil.copy2(recipe_src, recipe_dest)
+        if os.path.exists(eval_report_src):
+            shutil.copy2(eval_report_src, eval_report_dest)
 
         # 1. Write serve.py
         serve_py = os.path.join(export_dir, "serve.py")
@@ -84,6 +93,14 @@ class PackageBuilder:
                     arcname = os.path.relpath(file_path, export_dir)
                     zipf.write(file_path, arcname)
 
+        eval_report_data = None
+        if os.path.exists(eval_report_dest):
+            try:
+                with open(eval_report_dest, "r", encoding="utf-8") as f:
+                    eval_report_data = json.load(f)
+            except Exception:
+                pass
+
         return DeploymentPackage(
             job_id=job_id,
             model_dir=export_dir,
@@ -91,6 +108,8 @@ class PackageBuilder:
             tokenizer_path=tok_dest,
             serve_script_path=serve_py,
             interactive_ui_path=ui_html,
+            recipe_yaml_path=recipe_dest if os.path.exists(recipe_dest) else None,
             model_size_mb=model_size_mb,
-            eval_metrics=metrics
+            eval_metrics=metrics,
+            eval_report=eval_report_data
         )
