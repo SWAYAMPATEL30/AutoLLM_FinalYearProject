@@ -24,6 +24,7 @@ class DataCurationMode(str, Enum):
     WEB_SEARCH = "web_search"
     SYNTHETIC = "synthetic"
     AUGMENTED = "augmented"
+    DOCUMENT_INGEST = "document_ingest"
 
 class HardwareEstimate(BaseModel):
     device: DeviceType = DeviceType.CPU
@@ -32,9 +33,40 @@ class HardwareEstimate(BaseModel):
     estimated_vram_gb: float = 0.0
     recommended_max_params_m: float
     estimated_train_time_min: float
-    recommended_quantization: str = "FP32 / INT8 (CPU)"
+    recommended_quantization: str = "PyTorch Dynamic INT8 (CPU)"
     is_feasible: bool = True
     feasibility_notes: str = ""
+
+class QuantizationSpec(BaseModel):
+    precision: str = "int8"
+    original_size_mb: float = 0.0
+    quantized_size_mb: float = 0.0
+    compression_ratio_pct: float = 0.0
+    latency_speedup_factor: float = 1.0
+
+class RAGSpec(BaseModel):
+    document_source: str = "knowledge_corpus"
+    chunk_count: int = 0
+    embedding_dim: int = 128
+    top_k: int = 3
+    similarity_threshold: float = 0.1
+
+class DesignReportSpec(BaseModel):
+    target_name: str
+    layer_count: int
+    hidden_dimension: int
+    attention_heads: int
+    context_window: int
+    vocab_size: int
+    parameter_count_m: float
+    model_weights_fp32_mb: float
+    model_weights_int8_mb: float
+    optimizer_memory_adamw_mb: float
+    gradient_memory_mb: float
+    kv_cache_per_seq_kb: float
+    recommended_batch_size: int
+    feasibility_status: str
+    architectural_notes: str = ""
 
 class PipelineSpec(BaseModel):
     raw_prompt: str
@@ -53,7 +85,11 @@ class PipelineSpec(BaseModel):
     batch_size: int = 4
     learning_rate: float = 3e-4
     max_seq_len: int = 256
+    route_explanation: str = ""
     hardware_estimate: Optional[HardwareEstimate] = None
+    rag_spec: Optional[RAGSpec] = None
+    design_spec: Optional[DesignReportSpec] = None
+    quantization_spec: Optional[QuantizationSpec] = None
 
 class InstructionSample(BaseModel):
     instruction: str
@@ -115,6 +151,7 @@ class EvaluationReport(BaseModel):
     improvement_delta_pct: float
     failure_reduction_rate_pct: float
     avg_latency_ms: float
+    perplexity: Optional[float] = None
     failure_modes: List[Dict[str, Any]] = Field(default_factory=list)
     samples: List[EvaluationSample] = Field(default_factory=list)
     summary: str = ""
@@ -123,10 +160,13 @@ class DeploymentPackage(BaseModel):
     job_id: str
     model_dir: str
     model_weights_path: str
+    quantized_weights_path: Optional[str] = None
     tokenizer_path: str
     serve_script_path: str
     interactive_ui_path: str
     recipe_yaml_path: Optional[str] = None
+    vector_store_path: Optional[str] = None
     model_size_mb: float
     eval_metrics: Dict[str, Any] = Field(default_factory=dict)
+    quantization_metrics: Dict[str, Any] = Field(default_factory=dict)
     eval_report: Optional[Dict[str, Any]] = None

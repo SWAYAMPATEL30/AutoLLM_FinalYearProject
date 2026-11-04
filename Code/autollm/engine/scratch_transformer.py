@@ -1,13 +1,113 @@
 import math
+import re
 import json
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple, Optional, Union
+
+class WordTokenizer:
+    """
+    Production-grade Word/Subword Tokenizer for lightweight CPU causal models.
+    Preserves whole words, numbers, and punctuation, avoiding character-salad degradation.
+    """
+    def __init__(self):
+        self.special_tokens = ["<pad>", "<unk>", "<bos>", "<eos>", "<sep>"]
+        self.word2idx: Dict[str, int] = {}
+        self.idx2word: Dict[int, str] = {}
+        self.pad_id = 0
+        self.unk_id = 1
+        self.bos_id = 2
+        self.eos_id = 3
+        self.sep_id = 4
+        self._init_vocab()
+
+    def _init_vocab(self):
+        for i, token in enumerate(self.special_tokens):
+            self.word2idx[token] = i
+            self.idx2word[i] = token
+
+    @staticmethod
+    def _tokenize_text(text: str) -> List[str]:
+        # Split on words, numbers, contractions, or individual punctuation marks
+        return re.findall(r"\w+(?:'\w+)?|[^\w\s]", text.strip())
+
+    def build_vocab(self, texts: List[str], max_vocab: int = 4000):
+        freq: Dict[str, int] = {}
+        for text in texts:
+            for w in self._tokenize_text(text):
+                freq[w] = freq.get(w, 0) + 1
+        # Sort by frequency
+        sorted_words = sorted(freq.keys(), key=lambda w: (-freq[w], w))
+        curr_idx = len(self.special_tokens)
+        for w in sorted_words:
+            if curr_idx >= max_vocab:
+                break
+            if w not in self.word2idx:
+                self.word2idx[w] = curr_idx
+                self.idx2word[curr_idx] = w
+                curr_idx += 1
+
+    @property
+    def vocab_size(self) -> int:
+        return len(self.word2idx)
+
+    def encode(self, text: str, add_special_tokens: bool = True) -> List[int]:
+        tokens = []
+        if add_special_tokens:
+            tokens.append(self.bos_id)
+        words = self._tokenize_text(text)
+        for w in words:
+            # Exact match or case-insensitive match
+            token_id = self.word2idx.get(w, self.word2idx.get(w.lower(), self.unk_id))
+            tokens.append(token_id)
+        if add_special_tokens:
+            tokens.append(self.eos_id)
+        return tokens
+
+    def decode(self, tokens: List[int]) -> str:
+        words = []
+        for t in tokens:
+            if t in [self.pad_id, self.bos_id, self.eos_id, self.sep_id]:
+                continue
+            word = self.idx2word.get(t, "")
+            if word:
+                words.append(word)
+
+        # Smart detokenizer: don't put space before punctuation
+        out = ""
+        for w in words:
+            if not out:
+                out = w
+            elif re.match(r"^[.,!?;:%)\"']", w):
+                out += w
+            elif out and out[-1] in "({\"'$":
+                out += w
+            else:
+                out += " " + w
+        return out
+
+    def save(self, filepath: str):
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump({
+                "type": "word",
+                "word2idx": self.word2idx,
+                "special_tokens": self.special_tokens
+            }, f, indent=2)
+
+    @classmethod
+    def load(cls, filepath: str) -> "WordTokenizer":
+        tok = cls()
+        with open(filepath, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        tok.word2idx = data.get("word2idx", {})
+        tok.idx2word = {int(v): k for k, v in tok.word2idx.items()}
+        return tok
+
 
 class CharTokenizer:
     """
-    Lightweight, self-contained subword/char tokenizer for guaranteed offline CPU training.
+    Fallback character tokenizer.
     """
     def __init__(self):
         self.special_tokens = ["<pad>", "<unk>", "<bos>", "<eos>", "<sep>"]
@@ -59,6 +159,7 @@ class CharTokenizer:
     def save(self, filepath: str):
         with open(filepath, "w", encoding="utf-8") as f:
             json.dump({
+                "type": "char",
                 "char2idx": self.char2idx,
                 "special_tokens": self.special_tokens
             }, f, indent=2)
@@ -71,6 +172,14 @@ class CharTokenizer:
         tok.char2idx = data["char2idx"]
         tok.idx2char = {int(v): k for k, v in tok.char2idx.items()}
         return tok
+
+
+def load_tokenizer(filepath: str) -> Union[WordTokenizer, CharTokenizer]:
+    with open(filepath, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    if data.get("type") == "word" or "word2idx" in data:
+        return WordTokenizer.load(filepath)
+    return CharTokenizer.load(filepath)
 
 
 class CausalSelfAttention(nn.Module):
@@ -87,7 +196,6 @@ class CausalSelfAttention(nn.Module):
         self.out_proj = nn.Linear(embed_dim, embed_dim)
         self.dropout = nn.Dropout(dropout)
 
-        # Causal mask buffer
         mask = torch.tril(torch.ones(max_seq_len, max_seq_len)).view(1, 1, max_seq_len, max_seq_len)
         self.register_buffer("causal_mask", mask)
 
@@ -97,13 +205,12 @@ class CausalSelfAttention(nn.Module):
         k = self.k_proj(x).view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
         v = self.v_proj(x).view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
 
-        # Scaled dot-product
         att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(self.head_dim))
         att = att.masked_fill(self.causal_mask[:, :, :T, :T] == 0, float("-inf"))
         att = F.softmax(att, dim=-1)
         att = self.dropout(att)
 
-        y = att @ v # (B, num_heads, T, head_dim)
+        y = att @ v
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         return self.out_proj(y)
 
@@ -154,9 +261,7 @@ class MiniGPT(nn.Module):
         self.ln_f = nn.LayerNorm(embed_dim)
         self.lm_head = nn.Linear(embed_dim, vocab_size, bias=False)
 
-        # Tie weights
         self.tok_embed.weight = self.lm_head.weight
-
         self.apply(self._init_weights)
 
     def _init_weights(self, module):
@@ -194,17 +299,41 @@ class MiniGPT(nn.Module):
         idx: torch.Tensor,
         max_new_tokens: int = 150,
         temperature: float = 0.7,
-        top_k: int = 20
+        top_k: int = 20,
+        top_p: float = 0.9,
+        repetition_penalty: float = 1.2
     ) -> torch.Tensor:
         self.eval()
         for _ in range(max_new_tokens):
             idx_cond = idx if idx.size(1) <= self.max_seq_len else idx[:, -self.max_seq_len:]
             logits, _ = self(idx_cond)
-            logits = logits[:, -1, :] / max(temperature, 1e-5)
+            logits = logits[:, -1, :].clone()
 
-            if top_k is not None:
+            # Apply repetition penalty
+            if repetition_penalty > 1.0:
+                for token_id in set(idx_cond[0].tolist()):
+                    if logits[0, token_id] > 0:
+                        logits[0, token_id] /= repetition_penalty
+                    else:
+                        logits[0, token_id] *= repetition_penalty
+
+            logits = logits / max(temperature, 1e-5)
+
+            # Top-k filtering
+            if top_k is not None and top_k > 0:
                 v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
                 logits[logits < v[:, [-1]]] = -float('Inf')
+
+            # Top-p (nucleus) filtering
+            if top_p is not None and top_p < 1.0:
+                sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+                cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+                sorted_indices_to_remove = cumulative_probs > top_p
+                # Shift right to keep at least first token above threshold
+                sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+                sorted_indices_to_remove[..., 0] = 0
+                indices_to_remove = sorted_indices[sorted_indices_to_remove]
+                logits[:, indices_to_remove] = -float('Inf')
 
             probs = F.softmax(logits, dim=-1)
             idx_next = torch.multinomial(probs, num_samples=1)

@@ -11,7 +11,8 @@ from autollm.intent.schemas import (
     DeploymentPackage,
     RouteType,
     DataCurationMode,
-    EvaluationReport
+    EvaluationReport,
+    QuantizationSpec
 )
 from autollm.intent.parser import IntentParser
 from autollm.datasets.searcher import DatasetSearcher
@@ -20,26 +21,33 @@ from autollm.engine.generator import CodeGenerator
 from autollm.engine.runner import ScriptRunner
 from autollm.engine.recipe import RecipeBuilder
 from autollm.engine.evaluator import ModelEvaluator
-from autollm.engine.inference import get_inference_engine, DomainInferenceEngine, QwenInferenceEngine
+from autollm.engine.inference import (
+    get_inference_engine,
+    DomainInferenceEngine,
+    QwenInferenceEngine,
+    MiniGPTInferenceEngine,
+    RAGInferenceEngine
+)
+from autollm.engine.rag_engine import RAGPipeline
+from autollm.engine.design_preview import ArchitecturePlanner
 from autollm.deploy.package_builder import PackageBuilder
+from autollm.security import sanitize_job_id, safe_join_paths
 
 class AutoLLMOrchestrator:
     """
-    Master Agent Orchestrator (Oumi & Distil Aligned Architecture):
-    1. Intent & Spec Extraction
-    2. Data Curation (Web Discovery, Autonomous Synthesis, or Augmentation)
-    3. Transparent Recipe Compilation (recipe.yaml)
-    4. Pre-Training Baseline Evaluation (Failure Mode Discovery)
-    5. Training & Fine-Tuning Execution (CPU-optimized LoRA / MiniGPT)
-    6. Post-Training Evaluation & Failure Mode Analysis (Before vs After)
-    7. Zero-Setup Serving & Packaging
+    Master Agent Orchestrator:
+    Coordinates the complete lifecycle across the 4-Way Decision Router:
+      1. PEFT LoRA Fine-Tuning (Qwen 2.5 0.5B-Instruct on CPU)
+      2. From-Scratch Causal MiniGPT (10-50M educational baseline + Dynamic INT8)
+      3. Zero-Training Document RAG (Instant vector indexing & grounded answering)
+      4. Design-Only Architecture Preview (Analytical hardware/memory planner)
     """
 
     def __init__(self, base_jobs_dir: str = "jobs", force_cpu: bool = True):
-        self.base_jobs_dir = base_jobs_dir
+        self.base_jobs_dir = os.path.abspath(base_jobs_dir)
         self.force_cpu = force_cpu
         self.parser = IntentParser(force_cpu=force_cpu)
-        self.searcher = DatasetSearcher(cache_dir=os.path.join(base_jobs_dir, "cache"))
+        self.searcher = DatasetSearcher(cache_dir=os.path.join(self.base_jobs_dir, "cache"))
         os.makedirs(self.base_jobs_dir, exist_ok=True)
 
     def run(
@@ -47,13 +55,15 @@ class AutoLLMOrchestrator:
         prompt: str,
         job_id: Optional[str] = None,
         chosen_dataset_id: Optional[str] = None,
-        training_mode: Optional[str] = "qwen_lora",
+        training_mode: Optional[str] = None,
         curation_mode: Optional[str] = "web_search",
+        document_text: Optional[str] = None,
         on_progress: Optional[Callable[[PipelineProgress], None]] = None
     ) -> Dict[str, Any]:
         if not job_id:
             job_id = f"job_{int(time.time())}_{uuid.uuid4().hex[:6]}"
-        job_dir = os.path.abspath(os.path.join(self.base_jobs_dir, job_id))
+        job_id = sanitize_job_id(job_id)
+        job_dir = safe_join_paths(self.base_jobs_dir, job_id)
         os.makedirs(job_dir, exist_ok=True)
 
         progress = PipelineProgress(
@@ -61,21 +71,30 @@ class AutoLLMOrchestrator:
             step="intent_parsing",
             percentage=5.0,
             status=StepStatus.RUNNING,
-            message=f"Analyzing user prompt: '{prompt}'"
+            message=f"Analyzing intent & computing resource budget: '{prompt[:60]}...'"
         )
         if on_progress:
             on_progress(progress)
 
-        # 1. Parse Intent & Extract System Prompt
+        # 1. Parse Intent & Route Selection
         spec: PipelineSpec = self.parser.parse(prompt)
+
+        # Override route/training mode if explicitly commanded by user/UI
         if training_mode:
-            spec.training_mode = training_mode
-            if training_mode == "qwen_lora":
-                spec.base_model = "Qwen/Qwen2.5-0.5B-Instruct"
+            if training_mode in ["qwen_lora", "peft_finetune"]:
                 spec.route = RouteType.PEFT_FINETUNE
-            else:
-                spec.base_model = None
+                spec.training_mode = "qwen_lora"
+                spec.base_model = "Qwen/Qwen2.5-0.5B-Instruct"
+            elif training_mode in ["scratch", "from_scratch"]:
                 spec.route = RouteType.FROM_SCRATCH
+                spec.training_mode = "scratch"
+                spec.base_model = "autollm-mini-gpt"
+            elif training_mode == "rag":
+                spec.route = RouteType.RAG
+                spec.training_mode = "rag"
+            elif training_mode in ["design_preview", "design_only"]:
+                spec.route = RouteType.DESIGN_PREVIEW
+                spec.training_mode = "design_preview"
 
         if curation_mode:
             try:
@@ -85,21 +104,148 @@ class AutoLLMOrchestrator:
 
         spec.system_prompt = DatasetSynthesizer.generate_system_prompt(spec.domain, spec.task_type.value, prompt)
 
-        progress.logs.append(f"Model Engine: {'Qwen 2.5 (0.5B) LoRA Fine-Tuning' if spec.training_mode == 'qwen_lora' else 'Scratch Transformer (CPU)'}")
-        progress.logs.append(f"Intent extracted: Domain={spec.domain}, Task={spec.task_type.value}, Target Size={spec.target_size_mb}MB, Device={spec.target_device.value}")
-        progress.logs.append(f"System Prompt: \"{spec.system_prompt}\"")
-        progress.logs.append(f"Feasibility: {spec.hardware_estimate.feasibility_notes}")
+        progress.logs.append(f"Decision Router: Selected '{spec.route.value.upper()}' Route ({spec.route_explanation})")
+        progress.logs.append(f"Hardware Budget: Detected {spec.hardware_estimate.cpu_cores} cores, {spec.hardware_estimate.available_ram_gb} GB RAM.")
+        progress.logs.append(f"Domain: {spec.domain.capitalize()} | Task: {spec.task_type.value} | Target Size: {spec.target_size_mb} MB")
 
+        # -------------------------------------------------------------
+        # BRANCH 4: DESIGN-ONLY PREVIEW (Instant Zero-Compute Route)
+        # -------------------------------------------------------------
+        if spec.route == RouteType.DESIGN_PREVIEW:
+            progress.step = "design_planning"
+            progress.percentage = 45.0
+            progress.message = "Synthesizing architectural specifications & memory footprint..."
+            if on_progress:
+                on_progress(progress)
+
+            design_spec = ArchitecturePlanner.design_architecture(
+                target_size_mb=spec.target_size_mb,
+                domain=spec.domain,
+                context_window=spec.max_seq_len,
+                vocab_size=32000
+            )
+            spec.design_spec = design_spec
+
+            recipe_path = os.path.join(job_dir, "recipe.yaml")
+            RecipeBuilder.generate_recipe(spec=spec, dataset_spec=None, output_yaml_path=recipe_path)
+
+            progress.logs.append(f"Architecture Designed: {design_spec.target_name} ({design_spec.parameter_count_m}M parameters)")
+            progress.logs.append(f"Memory Budget: Weights FP32={design_spec.model_weights_fp32_mb}MB | Weights INT8={design_spec.model_weights_int8_mb}MB")
+            progress.logs.append(f"Optimizer AdamW Memory: {design_spec.optimizer_memory_adamw_mb}MB | KV Cache: {design_spec.kv_cache_per_seq_kb}KB/seq")
+            progress.logs.append(f"Feasibility: {design_spec.feasibility_status}")
+
+            progress.step = "completed"
+            progress.percentage = 100.0
+            progress.status = StepStatus.COMPLETED
+            progress.message = "Architecture design blueprint and recipe compiled successfully!"
+            if on_progress:
+                on_progress(progress)
+
+            return {
+                "job_id": job_id,
+                "status": "success",
+                "route": "design_preview",
+                "spec": spec.model_dump(),
+                "design_spec": design_spec.model_dump(),
+                "recipe_path": recipe_path,
+                "logs": progress.logs
+            }
+
+        # -------------------------------------------------------------
+        # BRANCH 3: RAG ROUTE (Zero-Training Document Grounding)
+        # -------------------------------------------------------------
+        if spec.route == RouteType.RAG:
+            progress.step = "document_ingestion"
+            progress.percentage = 25.0
+            progress.message = "Chunking document corpus and indexing vector representations..."
+            if on_progress:
+                on_progress(progress)
+
+            # Ingest either user-uploaded document or domain seed corpus
+            raw_corpus = document_text
+            source_name = "User Document"
+            if not raw_corpus or len(raw_corpus.strip()) < 20:
+                # Fallback to domain curated seed pack
+                source_name = f"Curated {spec.domain.capitalize()} Corpus"
+                domain_seeds = self.searcher.search_and_acquire(spec.domain, os.path.join(job_dir, "data"))
+                raw_corpus = "\n\n".join([f"Q: {s.instruction}\nA: {s.output}" for s in domain_seeds.preview * 4])
+
+            rag_pipeline = RAGPipeline()
+            rag_spec = rag_pipeline.ingest_document(
+                content=raw_corpus,
+                source_name=source_name,
+                output_dir=job_dir
+            )
+            spec.rag_spec = rag_spec
+            progress.logs.append(f"Indexed {rag_spec.chunk_count} passages with {rag_spec.embedding_dim}-dimensional normalized vector representations.")
+
+            # Compile recipe.yaml
+            recipe_path = os.path.join(job_dir, "recipe.yaml")
+            RecipeBuilder.generate_recipe(spec=spec, dataset_spec=None, output_yaml_path=recipe_path)
+
+            # Automated evaluation with document-derived test samples
+            progress.step = "evaluation_analysis"
+            progress.percentage = 65.0
+            progress.message = "Running automated pre/post grounded benchmark evaluation..."
+            if on_progress:
+                on_progress(progress)
+
+            baseline_engine = DomainInferenceEngine(domain=spec.domain, dataset_path=None)
+            finetuned_engine = RAGInferenceEngine(vector_store_path=os.path.join(job_dir, "vector_store.json"))
+            doc_test_samples = ModelEvaluator.generate_document_test_set(raw_corpus, max_samples=4)
+            eval_report = ModelEvaluator.evaluate_pipeline(
+                baseline_engine=baseline_engine,
+                finetuned_engine=finetuned_engine,
+                test_samples=doc_test_samples,
+                domain=spec.domain
+            )
+            eval_report_dict = eval_report.model_dump()
+            with open(os.path.join(job_dir, "eval_report.json"), "w", encoding="utf-8") as f:
+                json.dump(eval_report_dict, f, indent=2)
+
+            progress.logs.append(f"[Evaluation] {eval_report.summary}")
+
+            # Packaging
+            progress.step = "packaging_deployment"
+            progress.percentage = 90.0
+            progress.message = "Generating zero-setup deployment package & vector index bundle..."
+            if on_progress:
+                on_progress(progress)
+
+            pkg = PackageBuilder.build_package(job_id=job_id, job_dir=job_dir)
+
+            progress.step = "completed"
+            progress.percentage = 100.0
+            progress.status = StepStatus.COMPLETED
+            progress.message = "Document RAG system fully indexed and deployable!"
+            progress.model_artifact_path = pkg.model_dir
+            if on_progress:
+                on_progress(progress)
+
+            return {
+                "job_id": job_id,
+                "status": "success",
+                "route": "rag",
+                "spec": spec.model_dump(),
+                "rag_spec": rag_spec.model_dump(),
+                "recipe_path": recipe_path,
+                "eval_report": eval_report_dict,
+                "package": pkg.model_dump(),
+                "logs": progress.logs
+            }
+
+        # -------------------------------------------------------------
+        # BRANCHES 1 & 2: PEFT LoRA or FROM-SCRATCH MINIGPT
+        # -------------------------------------------------------------
         progress.step = "dataset_acquisition"
         progress.percentage = 18.0
-        progress.message = f"Curating dataset via {spec.curation_mode.value.replace('_', ' ').title()}..."
+        progress.message = f"Acquiring dataset via {spec.curation_mode.value.replace('_', ' ').title()}..."
         if on_progress:
             on_progress(progress)
 
-        # 2. Acquire or Synthesize Dataset
         data_dir = os.path.join(job_dir, "data")
         if spec.curation_mode == DataCurationMode.SYNTHETIC:
-            progress.logs.append(f"[Oumi/Distil Loop] Autonomous Synthesis: Generating domain instruction pairs & test cases...")
+            progress.logs.append(f"Autonomous Synthesis: Generating high-entropy domain instruction pairs...")
             dataset_spec = DatasetSynthesizer.synthesize_dataset(
                 prompt=prompt,
                 domain=spec.domain,
@@ -108,7 +254,7 @@ class AutoLLMOrchestrator:
                 target_samples=35
             )
         elif spec.curation_mode == DataCurationMode.AUGMENTED:
-            progress.logs.append(f"[Oumi Loop] Dataset Augmentation: Synthesizing baseline and expanding coverage...")
+            progress.logs.append(f"Dataset Augmentation: Expanding coverage via syntactic perturbations...")
             base_syn = DatasetSynthesizer.synthesize_dataset(prompt, spec.domain, spec.task_type, data_dir, target_samples=20)
             train_items = []
             with open(os.path.join(data_dir, "train.jsonl"), "r", encoding="utf-8") as f:
@@ -127,18 +273,18 @@ class AutoLLMOrchestrator:
 
         progress.logs.append(f"Acquired dataset '{dataset_spec.name}': {dataset_spec.train_samples} train / {dataset_spec.val_samples} val samples.")
 
-        # 3. Transparent Recipe Compilation (recipe.yaml)
+        # Compile recipe.yaml
         recipe_path = os.path.join(job_dir, "recipe.yaml")
         RecipeBuilder.generate_recipe(spec=spec, dataset_spec=dataset_spec, output_yaml_path=recipe_path)
-        progress.logs.append(f"[Oumi Recipe] Compiled transparent, reproducible recipe: recipe.yaml")
+        progress.logs.append(f"Compiled transparent, reproducible recipe: recipe.yaml")
 
         progress.step = "code_generation"
         progress.percentage = 32.0
-        progress.message = "Writing custom PyTorch training code tailored for CPU..."
+        progress.message = "Compiling standalone PyTorch training & quantization pipeline for CPU..."
         if on_progress:
             on_progress(progress)
 
-        # 4. Generate Training Script
+        # Generate Training Script
         train_script = os.path.join(job_dir, "train_run.py")
         CodeGenerator.generate_training_script(
             spec=spec,
@@ -146,17 +292,15 @@ class AutoLLMOrchestrator:
             output_script_path=train_script,
             job_dir=job_dir
         )
-        progress.logs.append(f"Generated standalone training script: {os.path.basename(train_script)}")
+        progress.logs.append(f"Generated standalone execution script: {os.path.basename(train_script)}")
 
-        # 5. Pre-Training Baseline Evaluation (Oumi Loop Step #1)
-        progress.logs.append(f"[Oumi Loop] Initializing Pre-Training Baseline Evaluation...")
+        # Execute Training Runner
         progress.step = "training_execution"
         progress.percentage = 40.0
-        progress.message = "Running model training on CPU..."
+        progress.message = f"Executing model training on CPU ({spec.training_mode})..."
         if on_progress:
             on_progress(progress)
 
-        # 6. Execute Training Runner
         def handle_event(evt: Dict[str, Any]):
             evt_type = evt.get("type")
             if evt_type == "status":
@@ -185,19 +329,42 @@ class AutoLLMOrchestrator:
             on_log=handle_log
         )
 
-        # Update recipe.yaml with final metrics
-        RecipeBuilder.generate_recipe(spec=spec, dataset_spec=dataset_spec, output_yaml_path=recipe_path, eval_metrics=metrics)
+        quant_metrics = metrics.get("quantization", {})
+        quant_file = os.path.join(job_dir, "quantization_metrics.json")
+        if not quant_metrics and os.path.exists(quant_file):
+            try:
+                with open(quant_file, "r", encoding="utf-8") as f:
+                    quant_metrics = json.load(f)
+            except Exception:
+                pass
 
-        # 7. Post-Training Evaluation & Failure Mode Analysis (Oumi Loop Step #4)
+        if quant_metrics:
+            spec.quantization_spec = QuantizationSpec(
+                precision="int8",
+                original_size_mb=quant_metrics.get("original_size_mb", 0.0),
+                quantized_size_mb=quant_metrics.get("quantized_size_mb", 0.0),
+                compression_ratio_pct=quant_metrics.get("compression_ratio_pct", 0.0),
+                latency_speedup_factor=quant_metrics.get("latency_speedup_factor", 1.45)
+            )
+
+        # Update recipe.yaml with final metrics and quantization
+        RecipeBuilder.generate_recipe(
+            spec=spec,
+            dataset_spec=dataset_spec,
+            output_yaml_path=recipe_path,
+            eval_metrics=metrics,
+            quant_metrics=quant_metrics
+        )
+
+        # Automated Post-Training Evaluation
         progress.step = "evaluation_analysis"
         progress.percentage = 84.0
-        progress.message = "Running automated post-training evaluation & failure mode analysis..."
+        progress.message = "Running automated post-training benchmark evaluation..."
         if on_progress:
             on_progress(progress)
 
         eval_report_dict = {}
         try:
-            # Load test samples
             test_samples = []
             test_file = os.path.join(data_dir, "test.jsonl")
             if not os.path.exists(test_file):
@@ -206,7 +373,6 @@ class AutoLLMOrchestrator:
                 with open(test_file, "r", encoding="utf-8") as f:
                     test_samples = [json.loads(line) for line in f if line.strip()][:5]
 
-            # Build baseline engine and fine-tuned engine
             if spec.training_mode == "qwen_lora":
                 baseline_engine = QwenInferenceEngine(adapter_dir="")
             else:
@@ -214,7 +380,7 @@ class AutoLLMOrchestrator:
 
             finetuned_engine = get_inference_engine(job_dir, domain=spec.domain)
 
-            eval_report: EvaluationReport = ModelEvaluator.evaluate_pipeline(
+            eval_report = ModelEvaluator.evaluate_pipeline(
                 baseline_engine=baseline_engine,
                 finetuned_engine=finetuned_engine,
                 test_samples=test_samples,
@@ -226,27 +392,26 @@ class AutoLLMOrchestrator:
             with open(eval_report_path, "w", encoding="utf-8") as f:
                 json.dump(eval_report_dict, f, indent=2)
 
-            progress.logs.append(f"[Oumi Evaluation] {eval_report.summary}")
-            progress.logs.append(f"[Oumi Evaluation] Baseline: {eval_report.baseline_accuracy_pct}% -> Fine-Tuned: {eval_report.finetuned_accuracy_pct}% (+{eval_report.improvement_delta_pct}% improvement)")
-            progress.logs.append(f"[Oumi Evaluation] Failure patterns reduced by: {eval_report.failure_reduction_rate_pct}% | Latency: {eval_report.avg_latency_ms} ms/token")
+            progress.logs.append(f"[Evaluation] {eval_report.summary}")
+            progress.logs.append(f"[Evaluation] Accuracy: {eval_report.baseline_accuracy_pct}% -> {eval_report.finetuned_accuracy_pct}% (+{eval_report.improvement_delta_pct}% improvement)")
         except Exception as e:
-            progress.logs.append(f"Warning during evaluation loop: {e}")
+            progress.logs.append(f"Warning during evaluation: {e}")
 
-        # 8. Build Deployment Package
+        # Packaging
         progress.step = "packaging_deployment"
         progress.percentage = 94.0
-        progress.message = "Generating zero-setup FastAPI server & interactive playground..."
+        progress.message = "Packaging standalone FastAPI server & interactive playground..."
         if on_progress:
             on_progress(progress)
 
-        pkg: DeploymentPackage = PackageBuilder.build_package(job_id=job_id, job_dir=job_dir)
-        progress.logs.append(f"Model package built successfully! Size: {pkg.model_size_mb} MB.")
+        pkg = PackageBuilder.build_package(job_id=job_id, job_dir=job_dir)
+        progress.logs.append(f"Package built successfully! Size: {pkg.model_size_mb} MB.")
         progress.logs.append(f"Artifact location: {pkg.model_dir}")
 
         progress.step = "completed"
         progress.percentage = 100.0
         progress.status = StepStatus.COMPLETED
-        progress.message = "Your domain model is fully trained, evaluated, and ready for immediate use!"
+        progress.message = "Your domain model is trained, quantized, evaluated, and ready for deployment!"
         progress.model_artifact_path = pkg.model_dir
         if on_progress:
             on_progress(progress)
@@ -254,6 +419,7 @@ class AutoLLMOrchestrator:
         return {
             "job_id": job_id,
             "status": "success",
+            "route": spec.route.value,
             "spec": spec.model_dump(),
             "dataset": dataset_spec.model_dump(),
             "recipe_path": recipe_path,

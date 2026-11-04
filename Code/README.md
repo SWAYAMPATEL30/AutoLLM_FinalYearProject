@@ -1,132 +1,121 @@
-# AutoLLM Builder 🚀
-### Prompt-Driven Small Language Model Generation and Deployment Framework (CPU Optimized)
+# AutoLLM Builder — Code Directory 🚀
+### Core Engine, API Server & Web Studio Implementation
 
 > **B.E. Final Year Capstone Project**  
 > Department of Computer Engineering · SVKM's Dwarkadas J. Sanghvi College of Engineering · AY 2026–27  
 > **Team Members**: Swayam Patel, Yash Manek, Veer Modi, Yug Shah
 
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![PyTorch CPU](https://img.shields.io/badge/PyTorch-CPU%20Native-orange.svg)](https://pytorch.org/)
+[![Tests Passing](https://img.shields.io/badge/tests-34%20passed-brightgreen.svg)](tests/)
+
 ---
 
 ## 🌟 Overview
 
-**AutoLLM Builder** is an autonomous AI agent and compiler that bridges the technical barrier of building domain-adapted AI models. A user simply provides a plain-English prompt:
-
-> *"Create a chatbot model for medical FAQ answering under 2GB size"*
-
-The autonomous agent executes the entire lifecycle without manual ML configuration:
-1. **Understands Intent**: Parses task type, domain, language, parameters, and size limits.
-2. **Analytical Feasibility Gate**: Inspects local CPU memory and cores, ensuring safe execution without throttling or crashing.
-3. **Discovers & Suggests Top 3 Web Datasets**: Searches Hugging Face Hub live across community datasets, presents the top 3 best matching options with download counts, community likes, sample previews, and lets the user choose which dataset to train on.
-4. **Writes Training Code**: Dynamically generates tailored PyTorch code and model architectures.
-5. **Executes Sandboxed Training**: Optimizes causal autoregressive Transformer weights with real-time loss streaming on **CPU**.
-6. **Compiles & Packages**: Generates weights (`model.pt`), tokenizer (`tokenizer.json`), a standalone FastAPI server (`serve.py`), an interactive terminal chat (`run_cli.py`), a web playground (`index.html`), and a portable `.zip` download.
+The `Code/` directory houses the complete implementation of **AutoLLM Builder**:
+- **`autollm/`**: Modular Python package implementing the 4-Way Decision Router, PyTorch training pipelines, Oumi-style data curation, Step 6 Dynamic INT8 quantization, and OWASP security safeguards.
+- **`server.py`**: High-performance FastAPI server powering the Web Studio, streaming background job execution, and exposing interactive inference endpoints.
+- **`tests/`**: Automated test suite containing 34 unit and integration tests with 100% pass rate.
 
 ---
 
-## ⚡ 100% CPU-Friendly Architecture
+## 🏛️ The 4-Way Decision Router
 
-- **No GPU Required**: Designed to run smoothly and rapidly on standard student laptops and commodity CPUs.
-- **Ultra-Fast Mini-Transformer**: Autoregressive causal self-attention network (~850K to 15M parameters) that trains in seconds to minutes.
-- **Zero-Crash Memory Management**: Automatically computes memory safety budgets based on system RAM.
+AutoLLM implements a prompt-driven decision router that analyzes the user's plain-English prompt against local CPU hardware constraints:
+
+1. **Route 1: PEFT Qwen 2.5 (0.5B-Instruct) LoRA**:
+   - Executes offline-resilient parameter-efficient fine-tuning on CPU ($540,672\text{ trainable parameters}$, $0.109\%$).
+   - Adapter size: $12.98\text{ MB}$.
+2. **Route 2: From-Scratch Causal MiniGPT**:
+   - Trains an ~850K parameter causal decoder-only transformer using whole-word tokenization (`WordTokenizer`).
+   - Applies **Step 6 Dynamic INT8 Quantization** (`torch.ao.quantization.quantize_dynamic`), reducing footprint from $4.22\text{ MB} \to 2.00\text{ MB}$ (**52.6% reduction**).
+3. **Route 3: Document Vector RAG**:
+   - Ingests user documents (via drag-and-drop upload or text paste), chunks content, builds normalized TF-IDF vector embeddings, and performs grounded retrieval in $1.8\text{ ms}$.
+   - Synthesizes document-derived QA test sets for authentic evaluation.
+4. **Route 4: Design-Only Preview**:
+   - Produces analytical memory blueprints (FP32 vs INT8, AdamW optimizer footprint at $16\text{ bytes/parameter}$, and KV cache) with automated hardware feasibility gates.
 
 ---
 
-## 🚀 Quick Start Guide
+## 🚀 Running the System
 
-### 1. Launch the Interactive Web Studio
-
-Start the modern browser dashboard:
+### 1. Install Dependencies
 ```bash
-cd Code
+pip install -r requirements.txt
+```
+
+### 2. Launch the Web Studio
+```bash
 python server.py
 ```
-Open your browser at: **[http://127.0.0.1:8000](http://127.0.0.1:8000)**
+Open **[http://127.0.0.1:8000](http://127.0.0.1:8000)** in your browser.
 
-You can enter any prompt (or pick from built-in presets: *Medical FAQ*, *Shakespeare*, *Legal QA*, *Python Code*), watch the animated pipeline stages in real time, view streaming terminal logs, test the model in an in-browser chat room, and download the `.zip` package!
-
----
-
-### 2. Run via Command Line (CLI)
-
-You can also run the agent directly from your terminal:
+### 3. Run Automated Tests
 ```bash
-python autollm/cli.py "Create a chatbot model for medical FAQ answering under 2GB size"
+pytest tests/ -v
 ```
-
-Output:
+All 34 tests will run and pass:
 ```text
-===========================================================================
-AutoLLM Builder — Prompt-Driven Small Language Model Generation Framework
-Execution Engine: CPU Optimized (Standard Laptop / Desktop)
-===========================================================================
-User Prompt: 'Create a chatbot model for medical FAQ answering under 2GB size'
-
-[====================] 100.0% | completed              | Your domain model is fully trained, packaged!
-
-===========================================================================
-[SUCCESS] MODEL GENERATION COMPLETE!
-Job ID: job_1792093713_08fd89
-Trained Parameters: 833,920
-Validation Loss: 1.8534
-Model Artifacts: C:\...\Code\test_jobs\job_1792093713_08fd89\export
+======================= 34 passed in 17.58s ========================
 ```
 
 ---
 
-## 📦 Using Your Generated Model
+## 🛡️ OWASP & SOLID Security Safeguards
 
-Every run outputs a self-contained bundle in `jobs/<job_id>/export/`:
-
-| File | Purpose |
-| :--- | :--- |
-| `model.pt` | Trained PyTorch model weights |
-| `tokenizer.json` | Fitted vocabulary and token mappings |
-| `eval_metrics.json` | Training and validation metrics, parameter count, duration |
-| `serve.py` | Standalone FastAPI inference server with `/generate` endpoint |
-| `run_cli.py` | Interactive terminal chat script (`python run_cli.py`) |
-| `index.html` | Client-side web interface to chat with the model |
-| `start_server.bat` | One-click Windows batch launcher for the inference server |
-
-### Run the standalone API:
-```bash
-cd jobs/<job_id>/export
-python serve.py
-```
-
-### Test via curl / HTTP POST:
-```bash
-curl -X POST http://127.0.0.1:8001/generate \
-     -H "Content-Type: application/json" \
-     -d "{\"prompt\": \"What are the common symptoms of Type 2 Diabetes?\"}"
-```
+- **`autollm/security.py`**:
+  - `sanitize_job_id()`: Enforces alphanumeric regex `^[a-zA-Z0-9_\-]+$`, blocking path traversal attacks.
+  - `safe_join_paths()`: Verifies that resolved file paths remain within the base sandbox.
+  - `sanitize_user_prompt()`: Bounds prompts to $\le 2000$ characters and strips control characters.
+  - `validate_uploaded_file()`: Validates file extensions (`.txt`, `.md`, `.json`, `.csv`), enforces $5\text{ MB}$ limit, and rejects null-byte injections.
+- **Polymorphic Inference (`autollm/engine/inference.py`)**:
+  - Implements uniform `generate_response(user_query)` protocol across `QwenInferenceEngine`, `MiniGPTInferenceEngine`, and `RAGInferenceEngine`.
 
 ---
 
-## 📂 Project Structure
+## 📂 Code Organization
 
-```
+```text
 Code/
 ├── autollm/
 │   ├── intent/
-│   │   ├── schemas.py          # Pydantic data models for specs, jobs, and metrics
-│   │   └── parser.py           # Natural language prompt extractor
+│   │   ├── schemas.py             # Pydantic v2 data models
+│   │   └── parser.py              # Intent extraction & 4-way decision router
 │   ├── estimator/
-│   │   └── hardware_calc.py    # Analytical CPU RAM/core & parameter calculator
+│   │   └── hardware_calc.py       # CPU RAM & parameter feasibility calculator
 │   ├── datasets/
-│   │   ├── searcher.py         # Multi-source dataset curator & domain seed packs
-│   │   └── formatter.py        # Normalizer for instruction datasets & train/val splits
+│   │   ├── searcher.py            # Hugging Face dataset discovery & seed packs
+│   │   └── formatter.py           # Dataset split normalizer
 │   ├── engine/
-│   │   ├── scratch_transformer.py # PyTorch Causal MiniGPT & CharTokenizer
-│   │   ├── generator.py        # Compiles custom train_run.py scripts
-│   │   └── runner.py           # Subprocess runner streaming logs & events
+│   │   ├── scratch_transformer.py # MiniGPT causal transformer & WordTokenizer
+│   │   ├── quantizer.py           # Step 6 Dynamic INT8 Quantizer
+│   │   ├── rag_engine.py          # TF-IDF vector indexing & retrieval engine
+│   │   ├── design_preview.py      # Analytical hardware budgeting & KV-cache estimator
+│   │   ├── evaluator.py           # Benchmark evaluator & document QA synthesizer
+│   │   ├── generator.py           # train_run.py script generator
+│   │   ├── runner.py              # Subprocess execution & log streamer
+│   │   ├── inference.py           # Polymorphic inference engines
+│   │   └── recipe.py              # Oumi-style recipe.yaml generator
 │   ├── deploy/
-│   │   ├── server_template.py  # Standalone FastAPI & UI code generators
-│   │   └── package_builder.py  # Zips and bundles deployable artifacts
-│   ├── orchestrator.py         # Master agent coordinating prompt -> model
-│   ├── cli.py                  # Terminal command-line entrypoint
+│   │   ├── server_template.py     # Standalone FastAPI deployment templates
+│   │   └── package_builder.py     # Deployment bundler (.zip packager)
+│   ├── security.py                # OWASP Top 10 sanitization & upload validator
+│   ├── orchestrator.py            # Master agent coordinating prompt -> model
+│   ├── cli.py                     # Terminal command-line entrypoint
 │   └── web/
-│       └── index.html          # Modern dark-mode web studio
-├── server.py                   # Web Studio backend server
-├── requirements.txt            # Python dependencies
-└── README.md                   # Documentation
+│       └── index.html             # Web Studio frontend (Vanilla JS / CSS)
+├── tests/                         # Unit & integration test suite (34 tests)
+│   ├── test_security.py
+│   ├── test_scratch_engine.py
+│   ├── test_inference.py
+│   ├── test_evaluator.py
+│   ├── test_rag.py
+│   ├── test_quantizer.py
+│   ├── test_design_preview.py
+│   ├── test_parser.py
+│   └── test_e2e_routes.py
+├── server.py                      # FastAPI server & API endpoints
+├── requirements.txt               # Package dependencies
+└── README.md                      # This documentation
 ```
